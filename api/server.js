@@ -12,7 +12,15 @@ app.get('/', (req, res) => {
 });
 
 // Configurações Globais
-app.use(cors());
+// Substitua o antigo app.use(cors()) por esse bloco mais forte:
+app.use(cors({
+    origin: '*',
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization']
+}));
+
+// Responder rapidamente a requisições de pré-voo (Pre-flight OPTIONS)
+app.options('*', cors());
 app.use(express.json());
 
 // 1. Conexão com o Supabase utilizando a Service Role (Admin)
