@@ -34,7 +34,7 @@ if (!supabaseUrl || !supabaseKey) {
 const supabase = createClient(supabaseUrl, supabaseKey);
 
 /* ===================================================================
-   NOVA SEÇÃO: ROTAS DE AUTENTICAÇÃO (LOGIN E CADASTRO)
+   ROTAS DE AUTENTICAÇÃO (LOGIN E CADASTRO) - COM STRATEGY UPSERT
    =================================================================== */
 
 // 1. Rota de Cadastro de Torcedores
@@ -48,13 +48,14 @@ app.post('/api/auth/signup', async (req, res) => {
         if (error) return res.status(400).json({ error: error.message });
         if (!data.user) return res.status(400).json({ error: "Erro ao registrar usuário." });
 
-        // Vincula o username customizado salvando na tua tabela pública 'profiles'
+        // ARRUMADO: Alterado de .insert() para .upsert(). 
+        // Se o trigger automático do banco já tiver criado o perfil, o .upsert atualiza o username!
         const { error: profileError } = await supabase
             .from('profiles')
-            .insert([{ id: data.user.id, username: username }]);
+            .upsert({ id: data.user.id, username: username }, { onConflict: 'id' });
 
         if (profileError) {
-            return res.status(400).json({ error: `Conta criada, mas erro no perfil: ${profileError.message}` });
+            return res.status(400).json({ error: `Conta criada, mas erro ao salvar perfil: ${profileError.message}` });
         }
 
         // Retorna o formato exato esperado pelo front-end
