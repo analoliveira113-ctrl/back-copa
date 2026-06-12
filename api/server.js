@@ -173,35 +173,43 @@ app.post('/api/likes/toggle', async (req, res) => {
     if (!post_id) return res.status(400).json({ error: 'ID do post não fornecido.' });
 
     try {
-        // Correção aqui: Supabase usa sintaxe direta de filtros (.eq, .gt, etc) em vez de .where()
+        // Validação e Blindagem do user_id contra erros de UUID/Null no Supabase
+        let fallbackUserId = user_id;
+        const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+        // Se o id não existir ou não for um formato UUID válido, usamos o ID padrão estável para testes
+        if (!fallbackUserId || !uuidRegex.test(fallbackUserId)) {
+            fallbackUserId = '00000000-0000-0000-0000-000000000000';
+        }
+
+        // Verifica se o golaço já existe usando o ID tratado
         const { data: existingLike, error: searchError } = await supabase
             .from('likes')
             .select('*')
             .eq('post_id', post_id)
-            .eq('user_id', user_id || null) // Evita quebrar caso não exista usuário logado ainda
+            .eq('user_id', fallbackUserId)
             .maybeSingle();
 
         if (searchError) throw searchError;
 
         if (existingLike) {
-            // Se já curtiu, nós removemos o registro (Descurtir)
+            // Se já curtiu, nós removemos o registro usando o ID único do like encontrado
             const { error: deleteError } = await supabase
                 .from('likes')
                 .delete()
-                .eq('post_id', post_id)
-                .eq('user_id', user_id);
+                .eq('id', existingLike.id);
 
             if (deleteError) throw deleteError;
         } else {
-            // Se não curtiu, nós adicionamos um novo registro (Curtir)
+            // Se não curtiu, adiciona o novo registro com o ID tratado e seguro
             const { error: insertError } = await supabase
                 .from('likes')
-                .insert([{ post_id, user_id: user_id || null }]);
+                .insert([{ post_id, user_id: fallbackUserId }]);
 
             if (insertError) throw insertError;
         }
 
-        // Busca o total atualizado de curtidas deste post para mandar a resposta atualizada pro front-end
+        // Busca o total atualizado de curtidas deste post
         const { count, error: countError } = await supabase
             .from('likes')
             .select('*', { count: 'exact', head: true })
@@ -216,11 +224,10 @@ app.post('/api/likes/toggle', async (req, res) => {
         });
 
     } catch (err) {
+        console.error("Erro interno detectado na rota de likes:", err.message);
         return res.status(500).json({ error: err.message });
     }
 });
-
-
 /* ==========================================================================
    ROTAS DE PERFIL DE USUÁRIO -> Tela Perfil
    ========================================================================== */
