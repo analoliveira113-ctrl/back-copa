@@ -11,8 +11,7 @@ app.get('/', (req, res) => {
     res.send('⚽ Back-end do CopaGram está online e operando! Pronto para o Hexa.');
 });
 
-// Configurações Globais
-// Substitua o antigo app.use(cors()) por esse bloco mais forte:
+// Configurações Globais de CORS e Parser
 app.use(cors({
     origin: '*',
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
@@ -28,7 +27,7 @@ const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY;
 
 if (!supabaseUrl || !supabaseKey) {
-    console.error("ERRO: Verifique se as variáveis SUPABASE_URL e SUPABASE_SERVICE_ROLE_KEY (ou SUPABASE_KEY) estão no seu .env");
+    console.error("ERRO: Verifique se as variáveis SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY (ou SUPABASE_KEY) estão no seu .env");
     process.exit(1);
 }
 
@@ -123,7 +122,7 @@ app.post('/api/posts', upload.single('image'), async (req, res) => {
 // Listar todos os posts do Feed principal -> Tela Feed
 app.get('/api/posts', async (req, res) => {
     try {
-        // Busca os posts trazendo junto o username e avatar do criador, além de contar os likes de cada post
+        // Busca os posts trazendo junto o username e avatar do criador, além da array contendo os registros de likes
         const { data, error } = await supabase
             .from('posts')
             .select(`
@@ -134,7 +133,14 @@ app.get('/api/posts', async (req, res) => {
             .order('created_at', { ascending: false });
 
         if (error) throw error;
-        return res.json(data);
+
+        // Mapeia os dados para injetar o atributo likesCount legível para o front-end
+        const postsComContador = data.map(post => ({
+            ...post,
+            likesCount: post.likes ? post.likes.length : 0
+        }));
+
+        return res.json(postsComContador);
     } catch (err) {
         return res.status(500).json({ error: err.message });
     }
@@ -163,23 +169,52 @@ app.get('/api/explore', async (req, res) => {
 // Dar um "Gol" (Curtir) ou tirar o "Gol" (Descurtir) -> Mecânica Toggle do Feed
 app.post('/api/likes/toggle', async (req, res) => {
     const { post_id, user_id } = req.body;
+
+    if (!post_id) return res.status(400).json({ error: 'ID do post não fornecido.' });
+
     try {
-        // Verifica se o usuário já curtiu esse post
+        // Correção aqui: Supabase usa sintaxe direta de filtros (.eq, .gt, etc) em vez de .where()
         const { data: existingLike, error: searchError } = await supabase
             .from('likes')
-            .where('post_id', 'eq', post_id)
-            .where('user_id', 'eq', user_id)
+            .select('*')
+            .eq('post_id', post_id)
+            .eq('user_id', user_id || null) // Evita quebrar caso não exista usuário logado ainda
             .maybeSingle();
 
+        if (searchError) throw searchError;
+
         if (existingLike) {
-            // Se já curtiu, nós removemos (Descurtir)
-            await supabase.from('likes').delete().match({ post_id, user_id });
-            return res.json({ status: 'unliked', message: 'Gol anulado pelo VAR!' });
+            // Se já curtiu, nós removemos o registro (Descurtir)
+            const { error: deleteError } = await supabase
+                .from('likes')
+                .delete()
+                .eq('post_id', post_id)
+                .eq('user_id', user_id);
+
+            if (deleteError) throw deleteError;
         } else {
-            // Se não curtiu, nós adicionamos (Curtir)
-            await supabase.from('likes').insert([{ post_id, user_id }]);
-            return res.json({ status: 'liked', message: 'GOOOOL!' });
+            // Se não curtiu, nós adicionamos um novo registro (Curtir)
+            const { error: insertError } = await supabase
+                .from('likes')
+                .insert([{ post_id, user_id: user_id || null }]);
+
+            if (insertError) throw insertError;
         }
+
+        // Busca o total atualizado de curtidas deste post para mandar a resposta atualizada pro front-end
+        const { count, error: countError } = await supabase
+            .from('likes')
+            .select('*', { count: 'exact', head: true })
+            .eq('post_id', post_id);
+
+        if (countError) throw countError;
+
+        return res.json({ 
+            status: existingLike ? 'unliked' : 'liked', 
+            message: existingLike ? 'Gol anulado pelo VAR!' : 'GOOOOL!',
+            likesCount: count || 0
+        });
+
     } catch (err) {
         return res.status(500).json({ error: err.message });
     }
@@ -220,7 +255,6 @@ app.get('/api/profiles/:username', async (req, res) => {
 });
 
 // Inicialização do Servidor na porta escolhida
-// Altere o final do seu api/server.js para isso:
 const PORT = process.env.PORT || 3000;
 
 // Só inicia o listen se não estiver rodando na Vercel (localmente)
