@@ -6,6 +6,11 @@ import 'dotenv/config';
 
 const app = express();
 
+// Rota para a página inicial não dar "Cannot GET /"
+app.get('/', (req, res) => {
+    res.send('⚽ Back-end do CopaGram está online e operando! Pronto para o Hexa.');
+});
+
 // Configurações Globais
 app.use(cors());
 app.use(express.json());
