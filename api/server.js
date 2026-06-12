@@ -37,7 +37,7 @@ const supabase = createClient(supabaseUrl, supabaseKey);
    ROTAS DE AUTENTICAÇÃO (LOGIN E CADASTRO) - COM STRATEGY UPSERT
    =================================================================== */
 
-// 1. Rota de Cadastro de Torcedores
+// 1. Rota de Cadastro de Torcedores (Sincronizada com /api/auth/signup)
 app.post('/api/auth/signup', async (req, res) => {
     const { email, password, username } = req.body;
 
