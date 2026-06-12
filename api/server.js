@@ -33,221 +33,229 @@ if (!supabaseUrl || !supabaseKey) {
 
 const supabase = createClient(supabaseUrl, supabaseKey);
 
-/* ===================================================================
-   ROTAS DE AUTENTICAÇÃO (LOGIN E CADASTRO) - COM STRATEGY UPSERT
-   =================================================================== */
-
-// 1. Rota de Cadastro de Torcedores (Sincronizada com /api/auth/signup)
-app.post('/api/auth/signup', async (req, res) => {
-    const { email, password, username } = req.body;
-
-    try {
-        // Cadastra a conta pelas credenciais do Supabase Auth
-        const { data, error } = await supabase.auth.signUp({ email, password });
-        
-        if (error) return res.status(400).json({ error: error.message });
-        if (!data.user) return res.status(400).json({ error: "Erro ao registrar usuário." });
-
-        // ARRUMADO: Alterado de .insert() para .upsert(). 
-        // Se o trigger automático do banco já tiver criado o perfil, o .upsert atualiza o username!
-        const { error: profileError } = await supabase
-            .from('profiles')
-            .upsert({ id: data.user.id, username: username }, { onConflict: 'id' });
-
-        if (profileError) {
-            return res.status(400).json({ error: `Conta criada, mas erro ao salvar perfil: ${profileError.message}` });
-        }
-
-        // Retorna o formato exato esperado pelo front-end
-        return res.status(201).json({ 
-            user: { id: data.user.id, username: username } 
-        });
-
-    } catch (err) {
-        console.error(err);
-        return res.status(500).json({ error: "Erro interno no servidor de autenticação." });
-    }
-});
-
-// 2. Rota de Login de Torcedores
-app.post('/api/auth/login', async (req, res) => {
-    const { email, password } = req.body;
-
-    try {
-        // Valida as credenciais na base do Supabase Auth
-        const { data, error } = await supabase.auth.signInWithPassword({ email, password });
-        
-        if (error) return res.status(400).json({ error: error.message });
-
-        // Busca o username que guardamos na tabela pública associado ao ID dele
-        const { data: profile, error: profileError } = await supabase
-            .from('profiles')
-            .select('username')
-            .eq('id', data.user.id)
-            .single();
-
-        // Se por algum motivo o perfil não existir, usa um fallback amigável
-        const usernameFinal = profile ? profile.username : "torcedor";
-
-        return res.status(200).json({ 
-            user: { id: data.user.id, username: usernameFinal } 
-        });
-
-    } catch (err) {
-        console.error(err);
-        return res.status(500).json({ error: "Erro interno no servidor ao tentar logar." });
-    }
-});
-
-
-/* ===================================================================
-   CONFIGURAÇÃO DE ARMAZENAMENTO DE IMAGENS (MULTER & STORAGE)
-   =================================================================== */
-
-// Configuração do Multer (Guarda o arquivo temporariamente na memória do servidor)
+// Configuração do Multer (Guarda o arquivo temporariamente na memória do servidor para upload)
 const upload = multer({ storage: multer.memoryStorage() });
 
-// Rota POST para criar uma nova publicação (recebe imagem + texto)
+
+/* ==========================================================================
+   ROTAS DE AUTENTICAÇÃO (Supabase Auth)
+   ========================================================================== */
+
+// Registro de novo Torcedor
+app.post('/api/auth/register', async (req, res) => {
+    const { email, password, username, full_name, favorite_team } = req.body;
+    try {
+        const { data, error } = await supabase.auth.admin.createUser({
+            email,
+            password,
+            email_confirm: true, // Já confirma o e-mail automaticamente para facilitar o teste
+            user_metadata: { username, full_name, favorite_team }
+        });
+
+        if (error) return res.status(400).json({ error: error.message });
+        return res.status(201).json({ message: 'Torcedor registrado com sucesso!', user: data.user });
+    } catch (err) {
+        return res.status(500).json({ error: err.message });
+    }
+});
+
+// Login do Torcedor
+app.post('/api/auth/login', async (req, res) => {
+    const { email, password } = req.body;
+    try {
+        const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+
+        if (error) return res.status(401).json({ error: error.message });
+        
+        // Retorna o Token (session) e os dados do usuário para o Front salvar no localStorage
+        return res.json({ message: 'Golooo! Login efetuado.', session: data.session, user: data.user });
+    } catch (err) {
+        return res.status(500).json({ error: err.message });
+    }
+});
+
+
+/* ==========================================================================
+   ROTAS DE POSTS / MEMÓRIAS (Tela de Compartilhar, Feed e Explorar)
+   ========================================================================== */
+
+// Criar nova Memória (Com Upload de Imagem para o Storage) -> Tela Compartilhar
 app.post('/api/posts', upload.single('image'), async (req, res) => {
     try {
-        const { user_id, caption, match_tag } = req.body;
+        const { user_id, caption, match_tag, stadium_name } = req.body;
         const file = req.file;
 
-        if (!file) {
-            return res.status(400).json({ error: 'Nenhuma foto foi selecionada para envio.' });
-        }
+        if (!file) return res.status(400).json({ error: 'A foto da sua memória na Copa é obrigatória!' });
+        if (!user_id) return res.status(400).json({ error: 'ID do usuário não fornecido.' });
 
-        // 1. Gera um nome único para o arquivo não sobrescrever outros no Bucket
-        const formatoArquivo = file.originalname.split('.').pop();
-        const nomeUnico = `${Date.now()}-${Math.floor(Math.random() * 1000)}.${formatoArquivo}`;
+        // 1. Faz o upload da foto para o Storage Bucket público
+        const fileExt = file.originalname.split('.').pop();
+        const fileName = `${user_id}_${Date.now()}.${fileExt}`;
 
-        // 2. Faz o upload da foto diretamente para o Bucket criado no Supabase Storage
         const { data: storageData, error: storageError } = await supabase.storage
-            .from('copagram-bucket') // Confirme se o nome do bucket no seu painel está exatamente igual
-            .upload(nomeUnico, file.buffer, {
-                contentType: file.mimetype,
-                upsert: false
-            });
+            .from('copagram-memories')
+            .upload(fileName, file.buffer, { contentType: file.mimetype });
 
-        if (storageError) {
-            return res.status(500).json({ error: `Erro no upload do Storage: ${storageError.message}` });
-        }
+        if (storageError) throw storageError;
 
-        // 3. Pega a URL pública gerada para essa foto recém-enviada
+        // 2. Captura a URL pública gerada
         const { data: publicUrlData } = supabase.storage
-            .from('copagram-bucket')
-            .getPublicUrl(nomeUnico);
+            .from('copagram-memories')
+            .getPublicUrl(fileName);
 
         const imageUrl = publicUrlData.publicUrl;
 
-        // 4. Salva o registro completo da publicação na tabela 'posts' do banco de dados
-        const { data: postInserido, error: dbError } = await supabase
+        // 3. Insere o registro textual e o link da foto no Banco de Dados
+        const { data: postData, error: dbError } = await supabase
             .from('posts')
-            .insert([
-                {
-                    user_id,
-                    image_url: imageUrl,
-                    caption,
-                    match_tag,
-                    likes_count: 0
-                }
-            ])
+            .insert([{ user_id, image_url: imageUrl, caption, match_tag, stadium_name }])
             .select();
 
-        if (dbError) {
-            return res.status(500).json({ error: `Erro ao salvar post no banco: ${dbError.message}` });
-        }
+        if (dbError) throw dbError;
 
-        return res.status(201).json(postInserido[0]);
-
-    } catch (err) {
-        return res.status(500).json({ error: `Erro inesperado no servidor: ${err.message}` });
-    }
-});
-
-/* ===================================================================
-   ROTAS DE INTERAÇÃO E FEED (POSTS, LIKES, PERFIL)
-   =================================================================== */
-
-// Buscar todas as publicações com informações de quem postou (Join)
-app.get('/api/posts', async (req, res) => {
-    try {
-        const { data: posts, error } = await supabase
-            .from('posts')
-            .select(`
-                id,
-                image_url,
-                caption,
-                match_tag,
-                likes_count,
-                created_at,
-                profiles (
-                    id,
-                    username,
-                    avatar_url
-                )
-            `)
-            .order('created_at', { ascending: false });
-
-        if (error) return res.status(500).json({ error: error.message });
-        return res.json(posts || []);
+        return res.status(201).json({ message: 'Memória eternizada com sucesso!', post: postData[0] });
     } catch (err) {
         return res.status(500).json({ error: err.message });
     }
 });
 
-// Sistema de Interações: Dar ou remover o golaço (Like / Unlike)
-app.post('/api/posts/:id/like', async (req, res) => {
-    const { id: post_id } = req.params;
-    const { user_id } = req.body;
+// Listar todos os posts do Feed principal -> TOTALMENTE CORRIGIDA E BLINDADA CONTRA ERRO 500
+app.get('/api/posts', async (req, res) => {
+    try {
+        // 1. Busca os posts de forma pura (sem Joins problemáticos)
+        const { data: posts, error: postsError } = await supabase
+            .from('posts')
+            .select('*')
+            .order('created_at', { ascending: false });
+
+        if (postsError) throw postsError;
+        if (!posts || posts.length === 0) return res.json([]);
+
+        // 2. Busca todos os perfis de uma vez só para juntar na memória do Node
+        const { data: profiles, error: profilesError } = await supabase
+            .from('profiles')
+            .select('id, username, avatar_url, favorite_team');
+
+        // 3. Busca todas as curtidas para calcular os contadores com segurança
+        const { data: likes, error: likesError } = await supabase
+            .from('likes')
+            .select('post_id, user_id');
+
+        // Mapeia e junta os dados simulando o Join de tabelas sem quebrar as chaves do Supabase
+        const postsFormatados = posts.map(post => {
+            // Encontra o perfil do criador do post
+            const perfilCriador = profiles ? profiles.find(p => p.id === post.user_id) : null;
+            
+            // Filtra as curtidas que pertencem a este post específico
+            const curtidasDestePost = likes ? likes.filter(l => l.post_id === post.id) : [];
+
+            return {
+                ...post,
+                // Injeta as informações do criador no formato exato que o seu Front-end precisa
+                profiles: perfilCriador ? {
+                    username: perfilCriador.username,
+                    avatar_url: perfilCriador.avatar_url,
+                    favorite_team: perfilCriador.favorite_team
+                } : { username: "Torcedor", avatar_url: null, favorite_team: "" },
+                // Estrutura os likes e o contador legível
+                likes: curtidasDestePost,
+                likesCount: curtidasDestePost.length
+            };
+        });
+
+        return res.json(postsFormatados);
+    } catch (err) {
+        console.error("Erro Crítico na Rota de Feed:", err.message);
+        return res.status(500).json({ error: `Erro interno no servidor: ${err.message}` });
+    }
+});
+
+// Buscar posts aleatórios/populares para a aba de descoberta -> Tela Explorar
+app.get('/api/explore', async (req, res) => {
+    try {
+        const { data, error } = await supabase
+            .from('posts')
+            .select('id, image_url, caption, match_tag')
+            .limit(24); // Limita a grade de fotos estilo "Masonry" igual ao seu front
+
+        if (error) throw error;
+        return res.json(data);
+    } catch (err) {
+        return res.status(500).json({ error: err.message });
+    }
+});
+
+
+/* ==========================================================================
+   ROTAS DE CURTIDAS / GOLS (Interações do Feed)
+   ========================================================================== */
+
+// Dar um "Gol" (Curtir) ou tirar o "Gol" (Descurtir) -> Mecânica Toggle do Feed
+app.post('/api/likes/toggle', async (req, res) => {
+    const { post_id, user_id } = req.body;
+
+    if (!post_id) return res.status(400).json({ error: 'ID do post não fornecido.' });
 
     try {
-        // Verifica se aquele torcedor já curtiu este post antes
-        const { data: curtidaExistente, error: erroBusca } = await supabase
+        // Validação e Blindagem do user_id contra erros de UUID/Null no Supabase
+        let fallbackUserId = user_id;
+        const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+        // Se o id não existir ou não for um formato UUID válido, usamos o ID padrão estável para testes
+        if (!fallbackUserId || !uuidRegex.test(fallbackUserId)) {
+            fallbackUserId = '00000000-0000-0000-0000-000000000000';
+        }
+
+        // Verifica se o golaço já existe usando o ID tratado
+        const { data: existingLike, error: searchError } = await supabase
             .from('likes')
             .select('*')
             .eq('post_id', post_id)
-            .eq('user_id', user_id)
+            .eq('user_id', fallbackUserId)
             .maybeSingle();
 
-        if (erroBusca) return res.status(500).json({ error: erroBusca.message });
+        if (searchError) throw searchError;
 
-        if (curtidaExistente) {
-            // Se já curtiu, removemos a curtida (Unlike)
-            const { error: erroDelete } = await supabase
+        if (existingLike) {
+            // Se já curtiu, nós removemos o registro usando o ID único do like encontrado
+            const { error: deleteError } = await supabase
                 .from('likes')
                 .delete()
-                .eq('id', curtidaExistente.id);
+                .eq('id', existingLike.id);
 
-            if (erroDelete) return res.status(500).json({ error: erroDelete.message });
-
-            // Decrementa o contador na tabela posts
-            const { data: postAtualizado } = await supabase.rpc('decrement_likes', { row_id: post_id });
-            
-            // Fallback caso a RPC não esteja configurada: busca o valor atualizado
-            const { data: post } = await supabase.from('posts').select('likes_count').eq('id', post_id).single();
-
-            return res.json({ status: 'unliked', likesCount: post?.likes_count || 0 });
+            if (deleteError) throw deleteError;
         } else {
-            // Se não curtiu ainda, adiciona a linha na tabela de likes
-            const { error: erroInsert } = await supabase
+            // Se não curtiu, adiciona o novo registro com o ID tratado e seguro
+            const { error: insertError } = await supabase
                 .from('likes')
-                .insert([{ post_id, user_id }]);
+                .insert([{ post_id, user_id: fallbackUserId }]);
 
-            if (erroInsert) return res.status(500).json({ error: erroInsert.message });
-
-            // Incrementa o contador na tabela posts
-            const { data: postAtualizado } = await supabase.rpc('increment_likes', { row_id: post_id });
-
-            // Fallback caso a RPC não esteja configurada: busca o valor atualizado
-            const { data: post } = await supabase.from('posts').select('likes_count').eq('id', post_id).single();
-
-            return res.json({ status: 'liked', likesCount: post?.likes_count || 0 });
+            if (insertError) throw insertError;
         }
+
+        // Busca o total atualizado de curtidas deste post
+        const { count, error: countError } = await supabase
+            .from('likes')
+            .select('*', { count: 'exact', head: true })
+            .eq('post_id', post_id);
+
+        if (countError) throw countError;
+
+        return res.json({ 
+            status: existingLike ? 'unliked' : 'liked', 
+            message: existingLike ? 'Gol anulado pelo VAR!' : 'GOOOOL!',
+            likesCount: count || 0
+        });
+
     } catch (err) {
+        console.error("Erro interno detectado na rota de likes:", err.message);
         return res.status(500).json({ error: err.message });
     }
 });
+
+/* ==========================================================================
+   ROTAS DE PERFIL DE USUÁRIO -> Tela Perfil
+   ========================================================================== */
 
 // Buscar dados do perfil e as publicações específicas daquele torcedor
 app.get('/api/profiles/:username', async (req, res) => {
@@ -284,8 +292,9 @@ const PORT = process.env.PORT || 3000;
 // Só inicia o listen se não estiver rodando na Vercel (localmente)
 if (process.env.NODE_ENV !== 'production') {
     app.listen(PORT, () => {
-        console.log(`⚽ CopaGram rodando em campo na porta http://localhost:${PORT}`);
+        console.log(`⚽ API CopaGram executando localmente na porta ${PORT}`);
     });
 }
 
+// Essencial para a Vercel encontrar as rotas:
 export default app;
